@@ -1,5 +1,5 @@
 import os
-
+import json
 import mmcv
 import open3d as o3d
 import numpy as np
@@ -258,6 +258,20 @@ def parse_args():
         type=str,
         default='./data/nuscenes',
         help='Path to nuScenes dataset')
+    #* occ gt根目录
+    parser.add_argument(
+        '--occ-root',
+        type=str,
+        default=None,
+        help='Root directory of occupancy GT'
+    )
+    #* nuScenes数据集info pkl路径, 如果不指定, 则使用root_path下的默认路径
+    parser.add_argument(
+        '--info-path',
+        type=str,
+        default=None,
+        help='Path to nuScenes dataset info pkl'
+    )
     parser.add_argument(
         '--save_path',
         type=str,
@@ -281,11 +295,31 @@ def main():
     args = parse_args()
     # load predicted results
     results_dir = args.res
+    occ_root = args.occ_root if args.occ_root else args.root_path
 
     # load dataset information
-    info_path = \
-        args.root_path + '/bevdetv2-nuscenes_infos_%s.pkl' % args.version
+    # info_path = \
+    #     args.root_path + '/bevdetv2-nuscenes_infos_%s.pkl' % args.version
+    info_path = args.info_path if args.info_path is not None else os.path.join(args.root_path,f'bevdetv2-nuscenes_infos_{args.version}.pkl')
+
     dataset = pickle.load(open(info_path, 'rb'))
+
+    # 根据 nuScenes 元数据建立 sample_token -> scene_name 映射
+    nuscenes_root = os.path.dirname(args.root_path)
+    with open(os.path.join(args.root_path, 'scene.json'), 'r') as f:
+        scenes = json.load(f)
+    with open(os.path.join(args.root_path, 'sample.json'), 'r') as f:
+        samples = json.load(f)
+    scene_token_to_name = {
+        scene['token']: scene['name']
+        for scene in scenes
+    }
+
+    sample_token_to_scene = {
+        sample['token']: scene_token_to_name[sample['scene_token']]
+        for sample in samples
+    }
+
     # prepare save path and medium
     vis_dir = args.save_path
     if not os.path.exists(vis_dir):
@@ -314,14 +348,28 @@ def main():
         if cnt % 10 == 0:
             print('%d/%d' % (cnt, min(args.vis_frames, len(dataset['infos']))))
 
-        scene_name = info['scene_name']
+        # scene_name = info['scene_name']
+        # sample_token = info['token']
         sample_token = info['token']
+        scene_name = sample_token_to_scene[sample_token]
 
-        pred_occ_path = os.path.join(results_dir, scene_name, sample_token, 'pred.npz')
+        # pred_occ_path = os.path.join(results_dir, scene_name, sample_token, 'pred.npz')
+        # pred_occ = np.load(pred_occ_path)['pred']
+        pred_occ_path = os.path.join(
+            results_dir, scene_name, sample_token + '.pkl'
+        )
+        if not os.path.isfile(pred_occ_path):
+            # print(f'[Skip] Prediction not found: {pred_occ_path}')
+            continue
+        pred_occ = mmcv.load(pred_occ_path)
+
+        assert isinstance(pred_occ, np.ndarray), type(pred_occ)
+        assert pred_occ.shape == (200, 200, 16), pred_occ.shape
+
         gt_occ_path = info['occ_path']
+        # gt_data = np.load(os.path.join(args.root_path, gt_occ_path, 'labels.npz'))
+        gt_data = np.load(os.path.join(occ_root, gt_occ_path, 'labels.npz'))
 
-        pred_occ = np.load(pred_occ_path)['pred']
-        gt_data = np.load(os.path.join(args.root_path, gt_occ_path, 'labels.npz'))
         voxel_label = gt_data['semantics']
         lidar_mask = gt_data['mask_lidar']
         camera_mask = gt_data['mask_camera']
@@ -362,7 +410,8 @@ def main():
 
         vis.poll_events()
         vis.update_renderer()
-        vis.run()
+        #* 可视化
+        # vis.run()
 
         # if args.format == 'image':
         #     out_dir = os.path.join(vis_dir, f'{scene_name}', f'{sample_token}')

@@ -126,7 +126,7 @@ class BEVDetOCC(BEVDet):
         outs = self.occ_head(img_feats)
         occ_preds = self.occ_head.get_occ(outs, img_metas)      # List[(Dx, Dy, Dz), (Dx, Dy, Dz), ...]
         return occ_preds
-    
+
     def forward_dummy(self,
                     points=None,
                     img_metas=None,
@@ -150,8 +150,8 @@ class BEVStereo4DOCC(BEVStereo4D):
                  occ_head=None,
                  **kwargs):
         super(BEVStereo4DOCC, self).__init__(**kwargs)
-        self.occ_head = build_head(occ_head)
         self.pts_bbox_head = None
+        self.occ_head = build_head(occ_head)
     def forward_train(self,
                       points=None,
                       img_metas=None,
@@ -232,10 +232,10 @@ class BEVStereo4DOCC(BEVStereo4D):
         # pts_feats: None
         # depth: (B*N_views, D, fH, fW)
         img_feats, _, _ = self.extract_feat(
-            points, img_inputs=img, img_metas=img_metas, **kwargs)
+            points, img_inputs=img, img_metas=img_metas, **kwargs) # img:(1 18 3 256 704)
 
         occ_list = self.simple_test_occ(img_feats[0], img_metas)    # List[(Dx, Dy, Dz), (Dx, Dy, Dz), ...]
-        return occ_list
+        return occ_list # (200 200 16)
 
     def simple_test_occ(self, img_feats, img_metas=None):
         """
@@ -249,5 +249,4 @@ class BEVStereo4DOCC(BEVStereo4D):
         outs = self.occ_head(img_feats)
         occ_preds = self.occ_head.get_occ(outs, img_metas)      # List[(Dx, Dy, Dz), (Dx, Dy, Dz), ...]
         return occ_preds
-    
-    
+

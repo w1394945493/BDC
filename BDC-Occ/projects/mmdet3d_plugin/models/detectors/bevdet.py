@@ -51,6 +51,7 @@ class BEVDet(CenterPoint):
         Returns:
             x: (B, C', 2*Dy, 2*Dx)
         """
+        #*==========================================#
         x = self.img_bev_encoder_backbone(x)
         x = self.img_bev_encoder_neck(x)
         if type(x) in [list, tuple]:
@@ -105,7 +106,7 @@ class BEVDet(CenterPoint):
         points (list[torch.Tensor], optional): Points of each sample.
                 Defaults to None.
         img_inputs:
-                imgs:  (B, N_views, 3, H, W)        
+                imgs:  (B, N_views, 3, H, W)
                 sensor2egos: (B, N_views, 4, 4)
                 ego2globals: (B, N_views, 4, 4)
                 intrins:     (B, N_views, 3, 3)

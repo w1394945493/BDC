@@ -270,7 +270,7 @@ class BEVStereo4D(BEVDepth4D):
                     bda  # (B, 3, 3)
                 )   # (B, C, Dy, Dx)
 
-        bev_feat = torch.cat(bev_feat_list, dim=1)
+        bev_feat = torch.cat(bev_feat_list, dim=1) # (1 160 200 200)
         x = self.bev_encoder(bev_feat)
         return [x], depth_key_frame
 

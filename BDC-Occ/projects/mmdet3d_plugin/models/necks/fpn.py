@@ -124,6 +124,9 @@ class CustomFPN(BaseModule):
         self.fpn_convs = nn.ModuleList()
 
         for i in range(self.start_level, self.backbone_end_level):
+            #*------------------------------------------------------#
+            #* 横向连接的通道缩减
+            #* l_conv: 1x1卷积 通过一次线性通道投影完成降维，空间分辨率不变。
             l_conv = ConvModule(
                 in_channels[i],
                 out_channels,
@@ -132,8 +135,8 @@ class CustomFPN(BaseModule):
                 norm_cfg=norm_cfg if not self.no_norm_on_lateral else None,
                 act_cfg=act_cfg,
                 inplace=False)
-
             self.lateral_convs.append(l_conv)
+            #* 输出卷积：fpn_conv: 3x3卷积，保持空间分辨率不变
             if i in self.out_ids:
                 fpn_conv = ConvModule(
                     out_channels,
@@ -176,7 +179,7 @@ class CustomFPN(BaseModule):
             lateral_conv(inputs[i + self.start_level])
             for i, lateral_conv in enumerate(self.lateral_convs)
         ]
-
+        #* 自顶向下融合方式
         # build top-down path
         used_backbone_levels = len(laterals)
         for i in range(used_backbone_levels - 1, 0, -1):
@@ -220,7 +223,9 @@ class CustomFPN(BaseModule):
 
 
 #---------------------------------------------------Occ Module-----------------------------------------------------------------------------
-
+# Binary_CustomFPN_BDC / CustomFPN:
+# Image Neck 二值化（Binary CustomFPN）：保留原始 FPN 的自顶向下多尺度特征融合结构，将横向连接中的 1×1 全精度卷积替换为多级 3×3 BDC 通道缩减模块，实现逐级通道压缩；
+# 同时采用 BDC 单元替换 FPN 输出卷积及额外尺度卷积，在保持多尺度特征融合能力的同时降低理论计算与存储开销。
 @NECKS.register_module()
 class Binary_CustomFPN_BDC(BaseModule):
     r"""Feature Pyramid Network.
@@ -326,6 +331,9 @@ class Binary_CustomFPN_BDC(BaseModule):
 
         for i in range(self.start_level, self.backbone_end_level):
             layers = []
+            #*------------------------------------------------------#
+            #* 将l_conv由原来的1x1conv，改为多级 3×3 BDC 单元（空间尺寸不变且通道数减半）
+            #* 将较大幅度的通道压缩拆分成多个阶段，使 BDC 模块能够逐级进行特征变换。
             num_decrease = int(math.log2(in_channels[i] // out_channels))
             temp_channel = in_channels[i] // 2
             for j in range(num_decrease):
@@ -336,14 +344,16 @@ class Binary_CustomFPN_BDC(BaseModule):
                     stride=1,
                     padding=1,
                     bias=False,
-                    with_bn=with_bn, 
+                    with_bn=with_bn,
                     with_cp=with_cp,
-                    )   
+                    )
                 temp_channel = temp_channel // 2
                 layers.append((f'l_conv_{i}_{j}', l_conv_temp))
             l_conv = nn.Sequential(OrderedDict(layers))
-
             self.lateral_convs.append(l_conv)
+            #*------------------------------------------------------#
+            #* 输出卷积：fpn_conv: 输入、输出通道数和卷积核大小与CustomFPN相同，区别主要在卷积模块的内部实现。
+            #* BDC 版本采用专门设计的二值卷积单元，目的是降低卷积计算和参数存储开销，同时尽量保留特征表达能力。
             if i in self.out_ids:
                 fpn_conv = BinaryConv2dBDC(
                     out_channels,
@@ -415,7 +425,8 @@ class Binary_CustomFPN_BDC(BaseModule):
             lateral_conv(inputs[i + self.start_level])
             for i, lateral_conv in enumerate(self.lateral_convs)
         ]
-
+        #*------------------------------------------------------#
+        #* 多尺度特征融合方式：自顶向下融合方式
         # build top-down path
         used_backbone_levels = len(laterals)
         for i in range(used_backbone_levels - 1, 0, -1):
@@ -571,7 +582,7 @@ class Binary_CustomFPN_BiSRNet(BaseModule):
                     stride=1,
                     padding=1,
                     bias=False,
-                    )   
+                    )
                 temp_channel = temp_channel // 2
                 layers.append((f'l_conv_{i}_{j}', l_conv_temp))
             l_conv = nn.Sequential(OrderedDict(layers))
@@ -797,7 +808,7 @@ class Binary_CustomFPN_ReActNet(BaseModule):
                     stride=1,
                     padding=1,
                     bias=False,
-                    )   
+                    )
                 temp_in_channel = temp_out_channel
                 temp_out_channel = temp_out_channel // 2
                 layers.append((f'l_conv_{i}_{j}', l_conv_temp))
@@ -1020,7 +1031,7 @@ class Binary_CustomFPN_BBCU(BaseModule):
                     kernel_size=3,
                     stride=1,
                     bias=False,
-                    )   
+                    )
                 temp_in_channel = temp_out_channel
                 temp_out_channel = temp_out_channel // 2
                 layers.append((f'l_conv_{i}_{j}', l_conv_temp))
@@ -1242,7 +1253,7 @@ class Binary_CustomFPN_BiMatting(BaseModule):
                     # kernel_size=3,
                     stride=1,
                     # bias=False,
-                    )   
+                    )
                 temp_in_channel = temp_out_channel
                 temp_out_channel = temp_out_channel // 2
                 layers.append((f'l_conv_{i}_{j}', l_conv_temp))
@@ -1466,9 +1477,9 @@ class Binary_CustomFPN_BRVE(BaseModule):
                     stride=1,
                     padding=1,
                     bias=False,
-                    with_bn=with_bn, 
+                    with_bn=with_bn,
                     with_cp=with_cp,
-                    )   
+                    )
                 temp_channel = temp_channel // 2
                 layers.append((f'l_conv_{i}_{j}', l_conv_temp))
             l_conv = nn.Sequential(OrderedDict(layers))
@@ -1586,7 +1597,7 @@ class Binary_CustomFPN_BRVE(BaseModule):
                     else:
                         outs.append(self.fpn_convs[i](outs[-1]))
         return outs
-    
+
 
 
 
@@ -1705,9 +1716,9 @@ class Binary_CustomFPN_JDB(BaseModule):
                     stride=1,
                     padding=1,
                     bias=False,
-                    with_bn=with_bn, 
+                    with_bn=with_bn,
                     with_cp=with_cp,
-                    )   
+                    )
                 temp_channel = temp_channel // 2
                 layers.append((f'l_conv_{i}_{j}', l_conv_temp))
             l_conv = nn.Sequential(OrderedDict(layers))

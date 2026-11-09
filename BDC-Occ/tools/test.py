@@ -2,7 +2,7 @@
 import argparse
 import os
 import warnings
-
+import json
 import mmcv
 import torch
 from mmcv import Config, DictAction
@@ -39,6 +39,13 @@ def parse_args():
     parser.add_argument('config', help='test config file path')
     parser.add_argument('checkpoint', help='checkpoint file')
     parser.add_argument('--out', help='output result file in pickle format')
+    #*
+    parser.add_argument(
+    '--out-dir',
+    type=str,
+    default=None,
+    help='Save per-frame predictions to scene/sample_token.pkl'
+    )
     parser.add_argument(
         '--fuse-conv-bn',
         action='store_true',
@@ -131,11 +138,103 @@ def parse_args():
     return args
 
 
+# 每个 batch 推理完成后立即保存。
+def prediction_paths(dataset, out_dir):
+    infos = getattr(dataset, 'data_infos', None)
+
+    if infos is None or len(infos) != len(dataset):
+        raise ValueError('dataset.data_infos does not match dataset length')
+
+    sample_scenes = None
+    version = getattr(dataset, 'version', '')
+
+    if version in ('v1.0-mini', 'v1.0-trainval', 'v1.0-test'):
+        dataset_root = getattr(dataset, 'dataset_root', None)
+        if dataset_root is None:
+            dataset_root = getattr(dataset, 'data_root', None)
+
+        table_dir = os.path.join(dataset_root, version)
+
+        with open(os.path.join(table_dir, 'scene.json')) as f:
+            scenes = {
+                item['token']: item['name']
+                for item in json.load(f)
+            }
+
+        with open(os.path.join(table_dir, 'sample.json')) as f:
+            sample_scenes = {
+                item['token']: scenes[item['scene_token']]
+                for item in json.load(f)
+            }
+
+    paths = []
+
+    for index, info in enumerate(infos):
+        token = info['token']
+
+        if not isinstance(token, str) or not token or '/' in token or '\\' in token:
+            raise ValueError(f'Invalid sample token: {token!r}')
+
+        if sample_scenes is not None:
+            if token not in sample_scenes:
+                raise ValueError(f'Sample token not found: {token}')
+
+            scene_name = sample_scenes[token]
+
+            if not scene_name or '/' in scene_name or '\\' in scene_name:
+                raise ValueError(f'Invalid scene name: {scene_name!r}')
+
+            path = os.path.join(out_dir, scene_name, token + '.pkl')
+        else:
+            path = os.path.join(out_dir, token + '.pkl')
+
+        paths.append(path)
+
+    if len(set(paths)) != len(paths):
+        raise ValueError('Duplicate prediction paths')
+
+    return paths
+
+
+def install_prediction_writer(model, data_loader, out_dir):
+    paths = prediction_paths(data_loader.dataset, out_dir)
+    batches = iter(data_loader.batch_sampler)
+    rank, _ = get_dist_info()
+
+    def save_after_forward(module, inputs, outputs):
+        indices = next(batches)
+
+        if len(indices) != len(outputs):
+            raise ValueError(
+                f'Batch size mismatch: {len(indices)} indices, '
+                f'{len(outputs)} predictions'
+            )
+
+        for index, prediction in zip(indices, outputs):
+            output_path = paths[index]
+            mmcv.mkdir_or_exist(os.path.dirname(output_path))
+
+            temp_path = (
+                f'{output_path}.rank{rank}.pid{os.getpid()}.tmp'
+            )
+
+            try:
+                mmcv.dump(prediction, temp_path, file_format='pkl')
+                os.replace(temp_path, output_path)
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+
+    return model.register_forward_hook(save_after_forward)
+
+
 def main():
     args = parse_args()
-
-    assert args.out or args.eval or args.format_only or args.show \
-        or args.show_dir, \
+    #*-------------------------------------------------------#
+    # assert args.out or args.eval or args.format_only or args.show \
+    #     or args.show_dir, \
+    assert args.out or args.out_dir or args.eval or args.format_only \
+        or args.show or args.show_dir, \
         ('Please specify at least one operation (save/eval/format/show the '
          'results / save the results) with the argument "--out", "--eval"'
          ', "--format-only", "--show" or "--show-dir"')
@@ -255,16 +354,52 @@ def main():
         # segmentation dataset has `PALETTE` attribute
         model.PALETTE = dataset.PALETTE
 
+    # if not distributed:
+    #     model = MMDataParallel(model, device_ids=cfg.gpu_ids)
+    #     outputs = single_gpu_test(model, data_loader, args.show, args.show_dir)
+    # else:
+    #     model = MMDistributedDataParallel(
+    #         model.cuda(),
+    #         device_ids=[torch.cuda.current_device()],
+    #         broadcast_buffers=False)
+    #     outputs = multi_gpu_test(model, data_loader, args.tmpdir,
+    #                              args.gpu_collect)
+
     if not distributed:
         model = MMDataParallel(model, device_ids=cfg.gpu_ids)
-        outputs = single_gpu_test(model, data_loader, args.show, args.show_dir)
     else:
         model = MMDistributedDataParallel(
             model.cuda(),
             device_ids=[torch.cuda.current_device()],
             broadcast_buffers=False)
-        outputs = multi_gpu_test(model, data_loader, args.tmpdir,
-                                 args.gpu_collect)
+
+    # 启用逐帧预测保存
+    writer = None
+
+    if args.out_dir:
+        args.out_dir = os.path.abspath(os.path.expanduser(args.out_dir))
+        mmcv.mkdir_or_exist(args.out_dir)
+        writer = install_prediction_writer(
+            model, data_loader, args.out_dir
+        )
+    try:
+        if not distributed:
+            outputs = single_gpu_test(
+                model, data_loader, args.show, args.show_dir
+            )
+        else:
+            outputs = multi_gpu_test(
+                model, data_loader, args.tmpdir,
+                args.gpu_collect
+            )
+    finally:
+        if writer is not None:
+            writer.remove()
+
+    if args.out_dir:
+        rank, _ = get_dist_info()
+        if rank == 0:
+            print(f'Per-frame predictions saved to: {args.out_dir}')
 
     rank, _ = get_dist_info()
     if rank == 0:

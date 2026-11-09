@@ -710,12 +710,12 @@ class BEVOCCHead2DBDC(BaseModule):
 
         """
         # (B, C, Dy, Dx) --> (B, C, Dy, Dx) --> (B, Dx, Dy, C)
-        occ_pred = self.final_conv(img_feats).permute(0, 3, 2, 1)
+        occ_pred = self.final_conv(img_feats).permute(0, 3, 2, 1) # (1 200 200 256)
         bs, Dx, Dy = occ_pred.shape[:3]
         if self.use_predicter:
             # (B, Dx, Dy, C) --> (B, Dx, Dy, 2*C) --> (B, Dx, Dy, Dz*n_cls)
-            occ_pred = self.predicter(occ_pred)
-            occ_pred = occ_pred.view(bs, Dx, Dy, self.Dz, self.num_classes)
+            occ_pred = self.predicter(occ_pred) # (1 200 200 288)
+            occ_pred = occ_pred.view(bs, Dx, Dy, self.Dz, self.num_classes) # (1 200 200 16 18)
 
         return occ_pred
 
@@ -876,7 +876,7 @@ class BEVOCCHead2DBRVE(BaseModule):
         occ_res = occ_score.argmax(-1)      # (B, Dx, Dy, Dz)
         occ_res = occ_res.cpu().numpy().astype(np.uint8)     # (B, Dx, Dy, Dz)
         return list(occ_res)
-    
+
 
 
 @HEADS.register_module()
