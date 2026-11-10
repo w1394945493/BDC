@@ -27,7 +27,9 @@ nus_attributes = ('cycle.with_rider', 'cycle.without_rider',
 def create_nuscenes_infos(root_path,
                           info_prefix,
                           version='v1.0-trainval',
-                          max_sweeps=10):
+                          max_sweeps=10,
+                          out_dir=None,
+                          info_postprocessor=None):
     """Create info file of nuscene dataset.
 
     Given the raw data, generate its related info file in pkl format.
@@ -39,7 +41,12 @@ def create_nuscenes_infos(root_path,
             Default: 'v1.0-trainval'.
         max_sweeps (int, optional): Max number of sweeps.
             Default: 10.
+        out_dir (str, optional): PKL destination; defaults to root_path.
+        info_postprocessor (callable, optional): Enrich each non-test info
+            using (info, sample, annotations, global_velocities, nusc).
     """
+    out_dir = root_path if out_dir is None else out_dir
+    os.makedirs(out_dir, exist_ok=True)
     from nuscenes.nuscenes import NuScenes
     nusc = NuScenes(version=version, dataroot=root_path, verbose=True)
     from nuscenes.utils import splits
@@ -79,24 +86,25 @@ def create_nuscenes_infos(root_path,
         print('train scene: {}, val scene: {}'.format(
             len(train_scenes), len(val_scenes)))
     train_nusc_infos, val_nusc_infos = _fill_trainval_infos(
-        nusc, train_scenes, val_scenes, test, max_sweeps=max_sweeps)
+        nusc, train_scenes, val_scenes, test, max_sweeps=max_sweeps,
+        info_postprocessor=info_postprocessor)
 
     metadata = dict(version=version)
     if test:
         print('test sample: {}'.format(len(train_nusc_infos)))
         data = dict(infos=train_nusc_infos, metadata=metadata)
-        info_path = osp.join(root_path,
+        info_path = osp.join(out_dir,
                              '{}_infos_test.pkl'.format(info_prefix))
         mmcv.dump(data, info_path)
     else:
         print('train sample: {}, val sample: {}'.format(
             len(train_nusc_infos), len(val_nusc_infos)))
         data = dict(infos=train_nusc_infos, metadata=metadata)
-        info_path = osp.join(root_path,
+        info_path = osp.join(out_dir,
                              '{}_infos_train.pkl'.format(info_prefix))
         mmcv.dump(data, info_path)
         data['infos'] = val_nusc_infos
-        info_val_path = osp.join(root_path,
+        info_val_path = osp.join(out_dir,
                                  '{}_infos_val.pkl'.format(info_prefix))
         mmcv.dump(data, info_val_path)
 
@@ -124,7 +132,8 @@ def get_available_scenes(nusc):
         has_more_frames = True
         scene_not_exist = False
         while has_more_frames:
-            lidar_path, boxes, _ = nusc.get_sample_data(sd_rec['token'])
+            # Only the path is needed; skip unused box transforms.
+            lidar_path = nusc.get_sample_data_path(sd_rec['token'])
             lidar_path = str(lidar_path)
             if os.getcwd() in lidar_path:
                 # path from lyftdataset is absolute path
@@ -146,7 +155,8 @@ def _fill_trainval_infos(nusc,
                          train_scenes,
                          val_scenes,
                          test=False,
-                         max_sweeps=10):
+                         max_sweeps=10,
+                         info_postprocessor=None):
     """Generate the train/val infos from the raw data.
 
     Args:
@@ -204,7 +214,11 @@ def _fill_trainval_infos(nusc,
         ]
         for cam in camera_types:
             cam_token = sample['data'][cam]
-            cam_path, _, cam_intrinsic = nusc.get_sample_data(cam_token)
+            # get_sample_data(cam_token) also transforms and projects every box.
+            # Its boxes were discarded; read the intrinsics directly instead.
+            cam_sd = nusc.get('sample_data', cam_token)
+            cam_cs = nusc.get('calibrated_sensor', cam_sd['calibrated_sensor_token'])
+            cam_intrinsic = np.array(cam_cs['camera_intrinsic'])
             cam_info = obtain_sensor2top(nusc, cam_token, l2e_t, l2e_r_mat,
                                          e2g_t, e2g_r_mat, cam)
             cam_info.update(cam_intrinsic=cam_intrinsic)
@@ -232,18 +246,18 @@ def _fill_trainval_infos(nusc,
             dims = np.array([b.wlh for b in boxes]).reshape(-1, 3)
             rots = np.array([b.orientation.yaw_pitch_roll[0]
                              for b in boxes]).reshape(-1, 1)
-            velocity = np.array(
-                [nusc.box_velocity(token)[:2] for token in sample['anns']])
+            global_velocities = np.array(
+                [nusc.box_velocity(token) for token in sample['anns']]
+            ).reshape(-1, 3)
+            velocity = global_velocities[:, :2].copy()
             valid_flag = np.array(
                 [(anno['num_lidar_pts'] + anno['num_radar_pts']) > 0
                  for anno in annotations],
                 dtype=bool).reshape(-1)
-            # convert velo from global to lidar
-            for i in range(len(boxes)):
-                velo = np.array([*velocity[i], 0.0])
-                velo = velo @ np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(
-                    l2e_r_mat).T
-                velocity[i] = velo[:2]
+            # Rotation inverses are transposes; transform all velocities at once.
+            # Keep the original zero vertical velocity for the LiDAR GT fields.
+            velo = np.column_stack((velocity, np.zeros(len(velocity))))
+            velocity = (velo @ e2g_r_mat @ l2e_r_mat)[:, :2]
 
             names = [b.name for b in boxes]
             for i in range(len(names)):
@@ -264,6 +278,9 @@ def _fill_trainval_infos(nusc,
             info['num_radar_pts'] = np.array(
                 [a['num_radar_pts'] for a in annotations])
             info['valid_flag'] = valid_flag
+
+        if not test and info_postprocessor is not None:
+            info_postprocessor(info, sample, annotations, global_velocities, nusc)
 
         if sample['scene_token'] in train_scenes:
             train_nusc_infos.append(info)
@@ -324,11 +341,11 @@ def obtain_sensor2top(nusc,
     l2e_r_s_mat = Quaternion(l2e_r_s).rotation_matrix
     e2g_r_s_mat = Quaternion(e2g_r_s).rotation_matrix
     R = (l2e_r_s_mat.T @ e2g_r_s_mat.T) @ (
-        np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T)
+        e2g_r_mat @ l2e_r_mat)
     T = (l2e_t_s @ e2g_r_s_mat.T + e2g_t_s) @ (
-        np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T)
-    T -= e2g_t @ (np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T
-                  ) + l2e_t @ np.linalg.inv(l2e_r_mat).T
+        e2g_r_mat @ l2e_r_mat)
+    T -= e2g_t @ (e2g_r_mat @ l2e_r_mat
+                  ) + l2e_t @ l2e_r_mat
     sweep['sensor2lidar_rotation'] = R.T  # points @ R.T + T
     sweep['sensor2lidar_translation'] = T
     return sweep

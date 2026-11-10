@@ -1,6 +1,7 @@
 
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
+import importlib.util
 import os
 import pickle
 import shutil
@@ -10,7 +11,17 @@ from nuscenes import NuScenes
 from nuscenes.utils.data_classes import Box
 from pyquaternion import Quaternion
 
-from tools.data_converter import nuscenes_converter
+# Other editable installs may expose a different top-level `tools` package.
+# Load the sibling converter explicitly for both direct and module execution.
+_converter_path = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    'data_converter', 'nuscenes_converter.py',
+)
+_converter_spec = importlib.util.spec_from_file_location(
+    'bdcocc_nuscenes_converter', _converter_path,
+)
+nuscenes_converter = importlib.util.module_from_spec(_converter_spec)
+_converter_spec.loader.exec_module(nuscenes_converter)
 
 
 map_name_from_general_to_detection = {
@@ -95,6 +106,8 @@ def nuscenes_data_prep(
     info_prefix,
     version,
     max_sweeps=0,
+    info_dir=None,
+    occ_root='gts',
 ):
     """Generate base nuScenes info files."""
     nuscenes_converter.create_nuscenes_infos(
@@ -102,7 +115,27 @@ def nuscenes_data_prep(
         info_prefix,
         version=version,
         max_sweeps=max_sweeps,
+        out_dir=info_dir,
+        info_postprocessor=lambda info, sample, annotations, velocities, nusc:
+            add_sample_ann_info(info, sample, annotations, velocities, nusc,
+                                occ_root),
     )
+
+
+def add_sample_ann_info(info, sample, annotations, velocities, nusc, occ_root):
+    """Reuse loaded annotations and global velocities before the only PKL write."""
+    ann_infos = []
+    for annotation, velocity in zip(annotations, velocities):
+        annotation = annotation.copy()
+        # Preserve the original handling of NaNs across all three components.
+        annotation['velocity'] = (np.zeros(3) if np.any(np.isnan(velocity))
+                                  else velocity)
+        ann_infos.append(annotation)
+    info['ann_infos'] = ann_infos
+    info['ann_infos'] = get_gt(info)
+    info['scene_token'] = sample['scene_token']
+    scene = nusc.get('scene', sample['scene_token'])
+    info['occ_path'] = os.path.join(occ_root, scene['name'], info['token'])
 
 
 def move_info_files(root_path, info_dir, info_prefix):
@@ -210,9 +243,8 @@ def parse_args():
     parser.add_argument(
         '--info-dir',
         type=str,
-        default=None,
-        help='Output directory for PKL files; '
-             'defaults to root-path',
+        default='data/nuscenes_infos',
+        help='Output directory for PKL files (default: data/nuscenes_infos)',
     )
 
     parser.add_argument(
@@ -252,7 +284,7 @@ def main():
 
     root_path = os.path.abspath(args.root_path)
     info_dir = os.path.abspath(
-        args.info_dir or args.root_path
+        args.info_dir
     )
 
     os.makedirs(info_dir, exist_ok=True)
@@ -262,29 +294,21 @@ def main():
     print('Version:', args.version)
     print('Info prefix:', args.info_prefix)
 
-    # Step 1: Generate base infos.
+    # Generate all fields in one pass and write directly to the output directory.
     nuscenes_data_prep(
         root_path=root_path,
         info_prefix=args.info_prefix,
         version=args.version,
         max_sweeps=args.max_sweeps,
-    )
-
-    # Step 2: Move infos to output directory.
-    move_info_files(
-        root_path=root_path,
         info_dir=info_dir,
-        info_prefix=args.info_prefix,
-    )
-
-    # Step 3: Add annotations and occupancy paths.
-    add_ann_adj_info(
-        root_path=root_path,
-        info_dir=info_dir,
-        info_prefix=args.info_prefix,
-        version=args.version,
         occ_root=args.occ_root,
     )
+
+    # Disabled: converter now writes directly to info_dir.
+    # move_info_files(root_path, info_dir, args.info_prefix)
+    # Disabled: fields are added in memory, reusing NuScenes and velocities.
+    # add_ann_adj_info(root_path, info_dir, args.info_prefix,
+    #                  args.version, args.occ_root)
 
     print('nuScenes data preparation completed.')
 

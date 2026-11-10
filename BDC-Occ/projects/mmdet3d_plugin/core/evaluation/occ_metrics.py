@@ -164,7 +164,14 @@ class Metric_mIoU():
 
         eval_res = dict()
         # eval_res['class_name'] = self.class_names
-        eval_res['mIoU'] = mIoU
+        # 原实现返回整组类别 IoU，训练评估后 TensorBoard.add_scalar 无法写入数组。
+        # eval_res['mIoU'] = mIoU
+        # 保留原始类别结果；日志中的 mIoU 使用与终端一致的非空类别均值，数值范围仍为 0～1。
+        self.class_iou = mIoU.copy()
+        eval_res['mIoU'] = float(np.nanmean(mIoU[:self.num_classes - 1]))
+        # 各类别分别返回 Python 标量，避免数组进入日志；最后的 empty 类不参与均值。
+        for class_name, class_iou in zip(self.class_names, mIoU):
+            eval_res[f'IoU/{class_name}'] = float(class_iou)
         # eval_res['cnt'] = self.cnt
         return eval_res
 

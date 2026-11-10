@@ -245,10 +245,16 @@ class LSSViewTransformer(BaseModule):
         B, N, D, H, W, _ = coor.shape
         num_points = B * N * D * H * W
         # record the index of selected points for acceleration purpose
-        ranks_depth = torch.range(
-            0, num_points - 1, dtype=torch.int, device=coor.device)    # (B*N*D*H*W, ), [0, 1, ..., B*N*D*fH*fW-1]
-        ranks_feat = torch.range(
-            0, num_points // D - 1, dtype=torch.int, device=coor.device)   # [0, 1, ...,B*N*fH*fW-1]
+        # 原实现：torch.range 包含右端点，但该接口已弃用。
+        # ranks_depth = torch.range(
+        #     0, num_points - 1, dtype=torch.int, device=coor.device)    # (B*N*D*H*W, ), [0, 1, ..., B*N*D*fH*fW-1]
+        # arange 不包含右端点，传入 num_points 可保持索引数量、取值、类型和设备不变。
+        ranks_depth = torch.arange(num_points, dtype=torch.int, device=coor.device)
+        # 原实现：每个图像特征位置对应一个索引，数量为 num_points // D。
+        # ranks_feat = torch.range(
+        #     0, num_points // D - 1, dtype=torch.int, device=coor.device)   # [0, 1, ...,B*N*fH*fW-1]
+        # 同样调整右端点，生成相同的特征索引，随后沿深度维展开。
+        ranks_feat = torch.arange(num_points // D, dtype=torch.int, device=coor.device)
         ranks_feat = ranks_feat.reshape(B, N, 1, H, W)
         ranks_feat = ranks_feat.expand(B, N, D, H, W).flatten()     # (B*N*D*fH*fW, )
 
@@ -258,8 +264,13 @@ class LSSViewTransformer(BaseModule):
                 self.grid_interval.to(coor))
         coor = coor.long().view(num_points, 3)      # (B, N, D, fH, fW, 3) --> (B*N*D*fH*fW, 3)
         # (B, N*D*fH*fW) --> (B*N*D*fH*fW, 1)
-        batch_idx = torch.range(0, B - 1).reshape(B, 1). \
-            expand(B, num_points // B).reshape(num_points, 1).to(coor)
+        # 原实现：默认在 CPU 创建浮点 batch 编号，展开后再转换到 coor 的设备和类型。
+        # batch_idx = torch.range(0, B - 1).reshape(B, 1). \
+        #     expand(B, num_points // B).reshape(num_points, 1).to(coor)
+        # 直接在目标设备生成同类型的整数编号 [0, B)，避免额外的类型转换和 CPU→GPU 传输。
+        # 每个样本的所有点使用相同 batch 编号，保持不同样本的 BEV 索引相互独立。
+        batch_idx = torch.arange(B, dtype=coor.dtype, device=coor.device).reshape(B, 1). \
+            expand(B, num_points // B).reshape(num_points, 1)
         coor = torch.cat((coor, batch_idx), 1)      # (B*N*D*fH*fW, 4)   4: (x, y, z, batch_id)
 
         # filter out points that are outside box

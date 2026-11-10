@@ -363,7 +363,13 @@ class LoadAnnotationsBEVDepth(object):
 
     def __call__(self, results):
         gt_boxes, gt_labels = results['ann_infos']      # (N_gt, 9),  (N_gt, )
-        gt_boxes, gt_labels = torch.Tensor(gt_boxes), torch.tensor(gt_labels)
+        # 原实现：直接将 ndarray 列表转为 Tensor，会触发逐元素转换的性能警告。
+        # gt_boxes, gt_labels = torch.Tensor(gt_boxes), torch.tensor(gt_labels)
+        # 先合并为 float32 数组，再与 Tensor 共享该数组内存，避免逐元素转换。
+        # copy=True 隔离原始标注，防止后续 BEV 增广的原地操作修改数据集中的数组。
+        gt_boxes = torch.from_numpy(np.array(gt_boxes, dtype=np.float32, copy=True))
+        # 标签保留原转换方式及其 dtype 推断行为，包括空列表的情况。
+        gt_labels = torch.tensor(gt_labels)
         rotate_bda, scale_bda, flip_dx, flip_dy = self.sample_bda_augmentation()
 
         bda_mat = torch.zeros(4, 4)

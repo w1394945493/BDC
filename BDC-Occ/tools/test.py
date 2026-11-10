@@ -3,6 +3,8 @@ import argparse
 import os
 import warnings
 import json
+import math
+import numpy as np
 import mmcv
 import torch
 from mmcv import Config, DictAction
@@ -39,6 +41,8 @@ def parse_args():
     parser.add_argument('config', help='test config file path')
     parser.add_argument('checkpoint', help='checkpoint file')
     parser.add_argument('--out', help='output result file in pickle format')
+    parser.add_argument(
+        '--eval-out', help='Save evaluation metrics to a JSON file; requires --eval')
     #*
     parser.add_argument(
     '--out-dir',
@@ -228,8 +232,51 @@ def install_prediction_writer(model, data_loader, out_dir):
     return model.register_forward_hook(save_after_forward)
 
 
+def save_evaluation_results(results, output_path, dataset):
+    """Save raw metrics and the occupancy summary printed by the evaluator."""
+    payload = {'metrics': results}
+    metric = getattr(dataset, 'occ_eval_metrics', None)
+    if metric is not None and isinstance(results, dict) and 'mIoU' in results:
+        # Match count_miou(): exclude the final (empty) class from the mean.
+        # 原实现假设 mIoU 为数组；现在该字段是标量，不能再进行切片。
+        # ious = np.asarray(results['mIoU'])[:metric.num_classes - 1]
+        # 从评估对象的混淆矩阵取得各类别 IoU，保持 JSON 汇总的百分比和类别明细不变。
+        ious = np.asarray(metric.per_class_iu(metric.hist))[:metric.num_classes - 1]
+        payload['occupancy_summary'] = {
+            'num_samples': metric.cnt,
+            'mIoU_percent': round(float(np.nanmean(ious)) * 100, 2),
+            'per_class_IoU_percent': {
+                name: round(float(value) * 100, 2)
+                for name, value in zip(metric.class_names, ious)
+            },
+        }
+
+    def json_value(value):
+        if isinstance(value, np.ndarray):
+            return json_value(value.tolist())
+        if isinstance(value, np.generic):
+            return json_value(value.item())
+        if isinstance(value, dict):
+            return {key: json_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [json_value(item) for item in value]
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        return value
+
+    output_path = os.path.abspath(os.path.expanduser(output_path))
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(json_value(payload), f, ensure_ascii=False, indent=2,
+                  allow_nan=False)
+        f.write('\n')
+    print(f'Evaluation metrics saved to: {output_path}')
+
+
 def main():
     args = parse_args()
+    if args.eval_out and not args.eval:
+        raise ValueError('--eval-out requires --eval')
     #*-------------------------------------------------------#
     # assert args.out or args.eval or args.format_only or args.show \
     #     or args.show_dir, \
@@ -418,7 +465,10 @@ def main():
             ]:
                 eval_kwargs.pop(key, None)
             eval_kwargs.update(dict(metric=args.eval, **kwargs))
-            print(dataset.evaluate(outputs, **eval_kwargs))
+            eval_results = dataset.evaluate(outputs, **eval_kwargs)
+            print(eval_results)
+            if args.eval_out:
+                save_evaluation_results(eval_results, args.eval_out, dataset)
 
 
 if __name__ == '__main__':
